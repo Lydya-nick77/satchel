@@ -2,6 +2,26 @@ local imgui = require('imgui')
 
 local ui = {}
 
+-- Ashita 4.3 adjusted BeginChild overloads; try multiple signatures for compatibility.
+local function begin_child_compat(id, size, border, flags)
+    local ok, began = pcall(imgui.BeginChild, id, size, border, flags)
+    if ok then
+        return began
+    end
+
+    ok, began = pcall(imgui.BeginChild, id, size, flags)
+    if ok then
+        return began
+    end
+
+    ok, began = pcall(imgui.BeginChild, id, size)
+    if ok then
+        return began
+    end
+
+    return false
+end
+
 function ui.render_left_tab_column(available_tabs, current_tab, format_tab_label)
     if current_tab == nil and #available_tabs > 0 then
         current_tab = available_tabs[1]
@@ -60,7 +80,7 @@ local function draw_slot(slot, index, key_prefix, ctx)
     imgui.PushStyleColor(ImGuiCol_Border, ctx.get_slot_border_color(slot))
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 })
 
-    local began = imgui.BeginChild(('##satchel_slot_%s_%d'):format(tostring(key_prefix or 'all'), index), { slot_size, slot_size }, true, child_flags)
+    local began = begin_child_compat(('##satchel_slot_%s_%d'):format(tostring(key_prefix or 'all'), index), { slot_size, slot_size }, true, child_flags)
     if began then
         if slot.id and slot.id > 0 then
             local tex = ctx.load_item_icon(slot.id)
@@ -146,7 +166,7 @@ function ui.render_slot_grid(slots, key_prefix, stat, ctx)
     local grid_height = (row_count * slot_size) + ((row_count - 1) * cell_gap)
 
     imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { cell_gap, cell_gap })
-    imgui.BeginChild(('##satchel_grid_%s'):format(tostring(key_prefix)), { grid_width, grid_height }, false)
+    begin_child_compat(('##satchel_grid_%s'):format(tostring(key_prefix)), { grid_width, grid_height }, false, 0)
     for i = 1, total_slots do
         local slot = packed[i]
 
