@@ -57,4 +57,27 @@ function icons.load_item_icon(satchel, item_id)
     return tex
 end
 
+function icons.load_file_icon(satchel, key, path)
+    if not satchel or not key or not path or path == '' then
+        return nil
+    end
+
+    satchel.file_icons = satchel.file_icons or {}
+    local cached = satchel.file_icons[key]
+    if cached ~= nil then
+        return cached or nil
+    end
+
+    local texture_ptr = ffi.new('IDirect3DTexture8*[1]')
+    local result = C.D3DXCreateTextureFromFileA(d3d8dev, path, texture_ptr)
+    if result ~= C.S_OK then
+        satchel.file_icons[key] = false
+        return nil
+    end
+
+    local tex = d3d8.gc_safe_release(ffi.cast('IDirect3DTexture8*', texture_ptr[0]))
+    satchel.file_icons[key] = tex
+    return tex
+end
+
 return icons

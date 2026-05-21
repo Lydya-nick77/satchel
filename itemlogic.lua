@@ -1,4 +1,11 @@
 local breader = require('bitreader')
+local time = nil
+do
+    local ok_time, time_lib = pcall(require, 'ffxi.time')
+    if ok_time then
+        time = time_lib
+    end
+end
 
 local function create_item_logic(ctx)
     local satchel = ctx.satchel
@@ -61,6 +68,36 @@ local function create_item_logic(ctx)
         ammo = 0x0008,
     }
 
+    local equip_slot_priority = {
+        { mask = weapon_slot_masks.main, name = 'main' },
+        { mask = weapon_slot_masks.sub, name = 'sub' },
+        { mask = weapon_slot_masks.range, name = 'range' },
+        { mask = weapon_slot_masks.ammo, name = 'ammo' },
+        { mask = armor_slot_masks.head, name = 'head' },
+        { mask = armor_slot_masks.body, name = 'body' },
+        { mask = armor_slot_masks.hands, name = 'hands' },
+        { mask = armor_slot_masks.legs, name = 'legs' },
+        { mask = armor_slot_masks.feet, name = 'feet' },
+        { mask = armor_slot_masks.neck, name = 'neck' },
+        { mask = armor_slot_masks.waist, name = 'waist' },
+        { mask = 0x0800, name = 'ear1' },
+        { mask = 0x1000, name = 'ear2' },
+        { mask = 0x2000, name = 'ring1' },
+        { mask = 0x4000, name = 'ring2' },
+        { mask = armor_slot_masks.back, name = 'back' },
+    }
+
+    local function is_wardrobe_container(container_id)
+        return container_id == 8
+            or container_id == 10
+            or container_id == 11
+            or container_id == 12
+            or container_id == 13
+            or container_id == 14
+            or container_id == 15
+            or container_id == 16
+    end
+
     local M = {}
 
     local function trim_text(value)
@@ -68,6 +105,29 @@ local function create_item_logic(ctx)
             return ''
         end
         return value:match('^%s*(.-)%s*$') or ''
+    end
+
+    local function escape_command_text(value)
+        return trim_text(value):gsub('"', '\\"')
+    end
+
+    local function get_primary_equip_slot_name(item)
+        if not item then
+            return nil
+        end
+
+        local slots = tonumber(item.Slots) or 0
+        if slots <= 0 then
+            return nil
+        end
+
+        for _, entry in ipairs(equip_slot_priority) do
+            if bit.band(slots, entry.mask) ~= 0 then
+                return entry.name
+            end
+        end
+
+        return nil
     end
 
     function M.clear_caches()
@@ -264,6 +324,36 @@ local function create_item_logic(ctx)
         return ('%d:%02d'):format(minutes, secs)
     end
 
+    local function format_enchant_status(enchant_info)
+        if not enchant_info then
+            return nil
+        end
+
+        local remaining = tonumber(enchant_info.remaining_charges)
+        local max_charges = tonumber(enchant_info.max_charges) or 0
+        local equip_delay = tonumber(enchant_info.equip_delay) or 0
+        local reuse_delay = tonumber(enchant_info.reuse_delay) or 0
+
+        local uses_text = nil
+        if max_charges > 0 and max_charges ~= 255 then
+            if remaining ~= nil then
+                uses_text = ('%d/%d'):format(remaining, max_charges)
+            else
+                uses_text = ('%d/%d'):format(max_charges, max_charges)
+            end
+        end
+
+        if not uses_text and equip_delay <= 0 and reuse_delay <= 0 then
+            return nil
+        end
+
+        local current_timer_text = format_duration(tonumber(enchant_info.use_delay) or 0)
+        local reuse_text = format_duration(reuse_delay)
+        local equip_text = format_duration(equip_delay)
+
+        return ('<%s %s/[ %s, %s]>'):format(uses_text or '--/--', current_timer_text, reuse_text, equip_text)
+    end
+
     local function get_inventory_item(slot)
         if not slot or slot.container_id == nil or slot.slot_index == nil then
             return nil
@@ -283,6 +373,19 @@ local function create_item_logic(ctx)
         return nil
     end
 
+    local function is_slot_in_bazaar(slot)
+        if not slot or slot.container_id ~= 0 or not slot.id or slot.id <= 0 then
+            return false
+        end
+
+        local inv_item = get_inventory_item(slot)
+        if not inv_item then
+            return false
+        end
+
+        return (tonumber(inv_item.Price) or 0) > 0
+    end
+
     local function get_enchantment_info(slot, item, resource)
         if not resource or not item then
             return nil
@@ -300,6 +403,7 @@ local function create_item_logic(ctx)
             equip_delay = equip_delay,
             reuse_delay = reuse_delay,
             remaining_charges = nil,
+            use_delay = 0,
         }
 
         local inv_item = get_inventory_item(slot)
@@ -309,6 +413,30 @@ local function create_item_logic(ctx)
             end)
             if ok and reader and reader:read(8) == 1 then
                 info.remaining_charges = reader:read(8)
+                local _flags = reader:read(16)
+                local time_value1 = reader:read(32)
+                local time_value2 = reader:read(32)
+
+                if time and time.game_time_diff then
+                    local use_delay = tonumber(time.game_time_diff(time_value1)) or 0
+                    local equip_delay_current = tonumber(time.game_time_diff(time_value2)) or 0
+                    local is_equipped = (tonumber(inv_item.Flags) == 5)
+
+                    -- Only force cast-delay minimum when item is not equipped.
+                    if (not is_equipped) and equip_delay_current < info.equip_delay then
+                        equip_delay_current = info.equip_delay
+                    end
+                    if use_delay < equip_delay_current then
+                        use_delay = equip_delay_current
+                    end
+
+                    if info.max_charges ~= 255 and info.remaining_charges == 0 then
+                        use_delay = 0
+                    end
+
+                    info.use_delay = math.max(0, use_delay)
+                end
+
                 if info.max_charges == 255 then
                     info.remaining_charges = 255
                 end
@@ -376,6 +504,137 @@ local function create_item_logic(ctx)
         end
 
         return table.concat(jobs, ' ')
+    end
+
+    local function get_item_races_text(item)
+        if not item then
+            return ''
+        end
+
+        local mask = read_number_field(item, 'Races')
+        if not mask then
+            return ''
+        end
+
+        local race_masks = {
+            hume_m = 0x0002,
+            hume_f = 0x0004,
+            elvaan_m = 0x0008,
+            elvaan_f = 0x0010,
+            tarutaru_m = 0x0020,
+            tarutaru_f = 0x0040,
+            hume = bit.bor(0x0002, 0x0004),
+            elvaan = bit.bor(0x0008, 0x0010),
+            tarutaru = bit.bor(0x0020, 0x0040),
+            mithra = 0x0080,
+            galka = 0x0100,
+            male = 0x012A,
+            female = 0x00D4,
+            all = 0x01FE,
+        }
+
+        local male_symbol = 'M'
+        local female_symbol = 'F'
+
+        if bit.band(mask, race_masks.all) == race_masks.all then
+            return 'All Races'
+        end
+
+        if bit.band(mask, race_masks.male) == race_masks.male and bit.band(mask, race_masks.female) == 0 then
+            return ('All Races %s'):format(male_symbol)
+        end
+
+        if bit.band(mask, race_masks.female) == race_masks.female and bit.band(mask, race_masks.male) == 0 then
+            return ('All Races %s'):format(female_symbol)
+        end
+
+        local names = {}
+
+        local function append_race_with_gender(base_name, male_bit, female_bit)
+            local has_m = bit.band(mask, male_bit) ~= 0
+            local has_f = bit.band(mask, female_bit) ~= 0
+            if has_m and has_f then
+                table.insert(names, base_name)
+            elseif has_m then
+                table.insert(names, ('%s %s'):format(base_name, male_symbol))
+            elseif has_f then
+                table.insert(names, ('%s %s'):format(base_name, female_symbol))
+            end
+        end
+
+        append_race_with_gender('Hume', race_masks.hume_m, race_masks.hume_f)
+        append_race_with_gender('Elvaan', race_masks.elvaan_m, race_masks.elvaan_f)
+        append_race_with_gender('Tarutaru', race_masks.tarutaru_m, race_masks.tarutaru_f)
+        if bit.band(mask, race_masks.mithra) ~= 0 then table.insert(names, 'Mithra') end
+        if bit.band(mask, race_masks.galka) ~= 0 then table.insert(names, 'Galka') end
+
+        return table.concat(names, ' ')
+    end
+
+    local function get_item_flags_text(item)
+        if not item then
+            return ''
+        end
+
+        local ok, raw = pcall(function() return item.Flags end)
+        local flags_val = (ok and tonumber(raw)) or 0
+        local flags = {}
+
+        if bit.band(flags_val, 0x8000) ~= 0 then table.insert(flags, 'RARE') end
+        if bit.band(flags_val, 0x4000) ~= 0 then table.insert(flags, 'EX') end
+
+        return table.concat(flags, ' ')
+    end
+
+    local function get_weapon_type_text(item)
+        local skill = item and read_number_field(item, 'Skill') or nil
+        if not skill then
+            return 'Weapon'
+        end
+
+        local by_skill = {
+            [1] = 'Hand-to-Hand',
+            [2] = 'Dagger',
+            [3] = 'Sword',
+            [4] = 'Great Sword',
+            [5] = 'Axe',
+            [6] = 'Great Axe',
+            [7] = 'Scythe',
+            [8] = 'Polearm',
+            [9] = 'Katana',
+            [10] = 'Great Katana',
+            [11] = 'Club',
+            [12] = 'Staff',
+            [25] = 'Archery',
+            [26] = 'Marksmanship',
+            [27] = 'Throwing',
+        }
+
+        return by_skill[skill] or 'Weapon'
+    end
+
+    local function get_armor_type_text(item)
+        local slot = get_primary_equip_slot_name(item)
+        if not slot then
+            return 'Armor'
+        end
+
+        local by_slot = {
+            head = 'Head',
+            body = 'Body',
+            hands = 'Hands',
+            legs = 'Legs',
+            feet = 'Feet',
+            neck = 'Neck',
+            waist = 'Waist',
+            ear1 = 'Earring',
+            ear2 = 'Earring',
+            ring1 = 'Ring',
+            ring2 = 'Ring',
+            back = 'Back',
+        }
+
+        return by_slot[slot] or 'Armor'
     end
 
     local function normalize_description_text(value)
@@ -525,9 +784,20 @@ local function create_item_logic(ctx)
         local item_name = M.get_item_name(slot.id)
         local item_type = M.get_item_type(slot.id)
         local enchant_info = get_enchantment_info(slot, item, item)
+        local is_bazaar_listed = is_slot_in_bazaar(slot)
 
         imgui.BeginTooltip()
         imgui.TextColored({ 1.0, 0.9, 0.55, 1.0 }, item_name)
+        
+        local flags_text = get_item_flags_text(item)
+        if flags_text ~= '' then
+            imgui.SameLine(0, 20)
+            imgui.TextColored({ 1.0, 0.2, 0.2, 1.0 }, flags_text)
+        end
+        
+        if is_bazaar_listed then
+            imgui.TextColored({ 0.95, 0.32, 0.32, 1.0 }, 'Listed in Bazaar (cannot use/equip)')
+        end
 
         if item_type == 7 then
             local desc = get_item_description_text(item, slot.id)
@@ -541,53 +811,72 @@ local function create_item_logic(ctx)
             local delay = item and read_number_field(item, 'Delay') or nil
             local level = item and read_number_field(item, 'Level') or nil
             local jobs = get_equip_jobs_text(item)
+            local races = get_item_races_text(item)
+            local family = (item_type == 4) and get_weapon_type_text(item) or get_armor_type_text(item)
 
             local has_stat = false
-            if dmg then
-                imgui.Text(('DMG: %d'):format(dmg))
-                has_stat = true
+
+            if races ~= '' then
+                imgui.Text(('(%s) %s'):format(family, races))
+            else
+                imgui.Text(('(%s)'):format(family))
             end
-            if def then
-                imgui.Text(('DEF: %d'):format(def))
-                has_stat = true
-            end
-            if delay then
-                imgui.Text(('Delay: %d'):format(delay))
-                has_stat = true
-            end
-            if level then
-                imgui.Text(('Lv: %d'):format(level))
-                has_stat = true
-            end
-            if jobs ~= '' then
-                imgui.TextWrapped(('Jobs: %s'):format(jobs))
-                has_stat = true
-            end
-            if enchant_info then
-                if enchant_info.max_charges > 0 and enchant_info.max_charges ~= 255 then
-                    local remaining = tonumber(enchant_info.remaining_charges)
-                    if remaining ~= nil then
-                        imgui.Text(('Uses: %d/%d'):format(remaining, enchant_info.max_charges))
-                    else
-                        imgui.Text(('Uses: %d'):format(enchant_info.max_charges))
-                    end
+
+            if item_type == 4 then
+                local combat_parts = {}
+                if dmg then table.insert(combat_parts, ('DMG:%d'):format(dmg)) end
+                if delay then table.insert(combat_parts, ('Delay:%d'):format(delay)) end
+                if #combat_parts > 0 then
+                    imgui.Text(table.concat(combat_parts, '  '))
                     has_stat = true
                 end
-                if enchant_info.equip_delay > 0 then
-                    imgui.Text(('Equip Delay: %s'):format(format_duration(enchant_info.equip_delay)))
+            else
+                if def then
+                    imgui.Text(('DEF:%d'):format(def))
                     has_stat = true
                 end
-                if enchant_info.reuse_delay > 0 then
-                    imgui.Text(('Reuse Delay: %s'):format(format_duration(enchant_info.reuse_delay)))
+                if delay then
+                    imgui.Text(('Delay:%d'):format(delay))
                     has_stat = true
                 end
             end
 
             local desc = get_item_description_text(item, slot.id)
             if desc ~= '' then
-                imgui.Separator()
-                render_desc_with_elements(desc)
-            elseif not has_stat then
+                if item_type == 4 then
+                    -- Strip the DMG/Delay line from weapon descriptions since those are already shown above
+                    local filtered_lines = {}
+                    for line in (desc .. '\n'):gmatch('([^\n]*)\n') do
+                        if not line:match('DMG:%d') and not line:match('Delay:%d') then
+                            table.insert(filtered_lines, line)
+                        end
+                    end
+                    -- Remove leading/trailing empty lines
+                    while #filtered_lines > 0 and filtered_lines[1] == '' do table.remove(filtered_lines, 1) end
+                    while #filtered_lines > 0 and filtered_lines[#filtered_lines] == '' do table.remove(filtered_lines) end
+                    desc = table.concat(filtered_lines, '\n')
+                end
+                if desc ~= '' then
+                    render_desc_with_elements(desc)
+                    has_stat = true
+                end
+            end
+
+            local level_jobs_parts = {}
+            if level then table.insert(level_jobs_parts, ('Lv.%d'):format(level)) end
+            if jobs ~= '' then table.insert(level_jobs_parts, jobs) end
+            if #level_jobs_parts > 0 then
+                imgui.TextWrapped(table.concat(level_jobs_parts, '  '))
+                has_stat = true
+            end
+
+            local enchant_status = format_enchant_status(enchant_info)
+            if enchant_status then
+                imgui.Text(enchant_status)
+                has_stat = true
+            end
+
+            if not has_stat then
                 imgui.TextColored({ 0.72, 0.72, 0.72, 1.0 }, 'No additional stats found.')
             end
         else
@@ -606,6 +895,10 @@ local function create_item_logic(ctx)
             return { 0.28, 0.28, 0.28, 0.80 }
         end
 
+        if is_slot_in_bazaar(slot) then
+            return { 0.92, 0.22, 0.22, 1.0 }
+        end
+
         local item_type = M.get_item_type(slot.id)
         if item_type == 4 or item_type == 5 then
             return { 0.35, 0.63, 0.95, 1.0 }
@@ -615,6 +908,50 @@ local function create_item_logic(ctx)
         end
 
         return { 0.72, 0.60, 0.35, 1.0 }
+    end
+
+    function M.build_right_click_command(slot)
+        if not slot or slot.container_id == nil or not slot.id or slot.id <= 0 then
+            return nil
+        end
+
+        if is_slot_in_bazaar(slot) then
+            return nil
+        end
+
+        local item_type = M.get_item_type(slot.id)
+        local item_resource = M.get_item_resource(slot.id)
+        local inv_item = get_inventory_item(slot)
+        local item_name = escape_command_text(M.get_item_name(slot.id))
+        if item_name == '' then
+            return nil
+        end
+
+        if item_type == 7 then
+            if slot.container_id == 0 then
+                return ('/item "%s" <me>'):format(item_name)
+            end
+            return nil
+        end
+
+        if item_type == 4 or item_type == 5 then
+            if slot.container_id == 0 or is_wardrobe_container(slot.container_id) then
+                local enchant_info = get_enchantment_info(slot, item_resource, item_resource)
+                local is_equipped = inv_item and (tonumber(inv_item.Flags) == 5)
+                local is_ready_to_use = enchant_info and (tonumber(enchant_info.use_delay) or 0) <= 0
+
+                if is_equipped and is_ready_to_use then
+                    return ('/item "%s" <me>'):format(item_name)
+                end
+
+                local equip_slot = get_primary_equip_slot_name(item_resource)
+                if equip_slot then
+                    return ('/equip %s "%s"'):format(equip_slot, item_name)
+                end
+            end
+        end
+
+        return nil
     end
 
     return M

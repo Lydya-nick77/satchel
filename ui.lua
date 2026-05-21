@@ -112,6 +112,10 @@ local function draw_slot(slot, index, key_prefix, ctx)
     if imgui.IsItemHovered() and slot.id and slot.id > 0 then
         ctx.render_item_detail_tooltip(slot)
     end
+
+    if slot.id and slot.id > 0 and imgui.IsItemClicked(ImGuiMouseButton_Right) and ctx.on_slot_right_click then
+        ctx.on_slot_right_click(slot)
+    end
 end
 
 function ui.render_slot_grid(slots, key_prefix, stat, ctx)
@@ -186,6 +190,34 @@ function ui.render_slot_grid(slots, key_prefix, stat, ctx)
     local used = (stat and stat.used) or 0
     local total = (stat and stat.total) or 0
     imgui.TextColored({ 0.78, 0.78, 0.78, 1.0 }, ('Used: %d / %d'):format(used, total))
+
+    if ctx.get_gil_amount and ctx.format_gil_text then
+        local gil_amount = ctx.get_gil_amount()
+        if gil_amount ~= nil then
+            local gil_text = ctx.format_gil_text(gil_amount)
+            local gil_icon = ctx.load_gil_icon and ctx.load_gil_icon() or nil
+            local icon_size = 14
+            local gap = 4
+
+            local text_w = imgui.CalcTextSize(gil_text)
+            text_w = tonumber(text_w) or 0
+
+            local right_width = text_w
+            if gil_icon then
+                right_width = right_width + icon_size + gap
+            end
+
+            local right_x = math.max(0, grid_width - right_width)
+            imgui.SameLine(right_x)
+
+            if gil_icon then
+                imgui.Image(ctx.tex_ptr(gil_icon), { icon_size, icon_size })
+                imgui.SameLine(0, gap)
+            end
+
+            imgui.TextColored({ 0.98, 0.88, 0.48, 1.0 }, gil_text)
+        end
+    end
 end
 
 return ui

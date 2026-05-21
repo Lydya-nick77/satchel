@@ -1,6 +1,6 @@
 ﻿addon.name      = 'satchel'
 addon.author    = 'Lydya'
-addon.version   = '0.2.3'
+addon.version   = '0.3.0'
 addon.desc      = 'Displays an inventory grid with item icons.'
 addon.link      = 'https://ashitaxi.com/'
 
@@ -13,6 +13,7 @@ local itemlogic = dofile(addon.path .. 'itemlogic.lua')
 local containerlogic = dofile(addon.path .. 'containerlogic.lua')
 local commands = dofile(addon.path .. 'commands.lua')
 local icons = dofile(addon.path .. 'icons.lua')
+local footerlogic = dofile(addon.path .. 'footerlogic.lua')
 
 local default_settings = T{
     visible = true,
@@ -31,6 +32,7 @@ local satchel = T{
     active_tab = nil,
     resize_on_next_frame = false,
     icons = {},
+    file_icons = {},
     names = {},
     item_types = {},
     item_sort_keys = {},
@@ -48,6 +50,12 @@ local cmd = commands.create({
     satchel = satchel,
     default_settings = default_settings,
     normalize_include_containers = containerlogic.normalize_include_containers,
+})
+
+local footer = footerlogic.create({
+    satchel = satchel,
+    icons = icons,
+    gil_icon_path = addon.path .. 'assets/gil.png',
 })
 
 local tab_order = containerlogic.tab_order
@@ -74,6 +82,7 @@ end)
 
 ashita.events.register('unload', 'satchel_unload', function()
     satchel.icons = {}
+    satchel.file_icons = {}
     items.clear_caches()
     settings.save()
 end)
@@ -94,6 +103,20 @@ local function render_slot_grid(slots, key_prefix, stat)
         tex_ptr = icons.tex_ptr,
         get_slot_border_color = items.get_slot_border_color,
         render_item_detail_tooltip = items.render_item_detail_tooltip,
+        on_slot_right_click = function(slot)
+            local command = items.build_right_click_command(slot)
+            if not command then
+                return
+            end
+
+            local chat_manager = AshitaCore:GetChatManager()
+            if chat_manager then
+                chat_manager:QueueCommand(1, command)
+            end
+        end,
+        get_gil_amount = footer.get_player_gil_amount,
+        format_gil_text = footer.format_gil_text,
+        load_gil_icon = footer.load_gil_icon,
     })
 end
 
